@@ -3,10 +3,44 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { body, validationResult } = require('express-validator');
-const fs = require('fs').promises;
+const fs = require('fs');
 const path = require('path');
-const { v4: uuidv4 } = require('uuid');
 const moment = require('moment');
+const dataStore = require('./data/database');
+
+const knowledgeBasePath = path.join(__dirname, 'knowledge-base.json');
+const defaultKnowledgeBase = [
+  {
+    keywords: ['merhaba', 'selam', 'hey', 'hi'],
+    response: 'Merhaba! HayDay Malzemeleri destek ekibine hoş geldiniz. Size nasıl yardımcı olabilirim?',
+    confidence: 0.9,
+    usage: 0
+  },
+  {
+    keywords: ['altın', 'para', 'transfer'],
+    response: 'Altın transferi hakkında detaylı bilgi için "Sorular & İletişim" sayfamızı ziyaret edebilirsiniz.',
+    confidence: 0.8,
+    usage: 0
+  },
+  {
+    keywords: ['fiyat', 'ücret', 'ne kadar'],
+    response: 'Ürün fiyatları için "Ürün Listenizi Oluşturun" sayfasını inceleyebilirsiniz.',
+    confidence: 0.8,
+    usage: 0
+  },
+  {
+    keywords: ['depolama', 'ağıl', 'ambar'],
+    response: 'Depolama hesaplamaları için "Depolama Hesaplayıcısı" sayfamızı kullanabilirsiniz.',
+    confidence: 0.8,
+    usage: 0
+  },
+  {
+    keywords: ['makine', 'üretim', 'seviye'],
+    response: 'Makine bilgileri için "Makineler" sayfamızdan detaylı bilgi alabilirsiniz.',
+    confidence: 0.8,
+    usage: 0
+  }
+];
 
 // Load environment variables
 require('dotenv').config();
@@ -40,82 +74,6 @@ class Logger {
 
   static debug(message, meta = {}) {
     Logger.log('debug', message, meta);
-  }
-}
-
-// File Locking Mechanism
-class FileLock {
-  static locks = new Map();
-
-  static async acquire(filePath) {
-    const lockKey = path.resolve(filePath);
-    
-    if (FileLock.locks.has(lockKey)) {
-      // Wait for existing lock to be released
-      await new Promise(resolve => {
-        const checkLock = () => {
-          if (!FileLock.locks.has(lockKey)) {
-            resolve();
-          } else {
-            setTimeout(checkLock, 10);
-          }
-        };
-        checkLock();
-      });
-    }
-    
-    FileLock.locks.set(lockKey, Date.now());
-    Logger.debug(`File lock acquired: ${lockKey}`);
-  }
-
-  static release(filePath) {
-    const lockKey = path.resolve(filePath);
-    FileLock.locks.delete(lockKey);
-    Logger.debug(`File lock released: ${lockKey}`);
-  }
-}
-
-// Enhanced File Manager
-class FileManager {
-  static async readJSONFile(filePath, defaultValue = []) {
-    try {
-      await FileLock.acquire(filePath);
-      
-      try {
-        const data = await fs.readFile(filePath, 'utf8');
-        return JSON.parse(data);
-      } catch (error) {
-        if (error.code === 'ENOENT') {
-          await FileManager.writeJSONFile(filePath, defaultValue);
-          return defaultValue;
-        }
-        throw error;
-      }
-    } catch (error) {
-      Logger.error(`Failed to read file: ${filePath}`, error);
-      return defaultValue;
-    } finally {
-      FileLock.release(filePath);
-    }
-  }
-
-  static async writeJSONFile(filePath, data) {
-    try {
-      await FileLock.acquire(filePath);
-      
-      const tempPath = `${filePath}.tmp.${Date.now()}`;
-      const jsonData = JSON.stringify(data, null, 2);
-      
-      await fs.writeFile(tempPath, jsonData, 'utf8');
-      await fs.rename(tempPath, filePath);
-      
-      return true;
-    } catch (error) {
-      Logger.error(`Failed to write file: ${filePath}`, error);
-      return false;
-    } finally {
-      FileLock.release(filePath);
-    }
   }
 }
 
@@ -217,14 +175,6 @@ const chatLimiter = rateLimit({
 
 app.use('/api/chat/', chatLimiter);
 
-// File paths
-const FILES = {
-  chatLog: './chat-log.json',
-  knowledgeBase: './knowledge-base.json',
-  analytics: './analytics.json',
-  adminSessions: './admin-sessions.json'
-};
-
 // ChatBot Brain
 class ChatBotBrain {
   constructor() {
@@ -234,38 +184,18 @@ class ChatBotBrain {
   }
 
   async loadKnowledgeBase() {
-    this.knowledgeBase = await FileManager.readJSONFile(FILES.knowledgeBase, [
-      {
-        keywords: ['merhaba', 'selam', 'hey', 'hi'],
-        response: 'Merhaba! HayDay Malzemeleri destek ekibine hoş geldiniz. Size nasıl yardımcı olabilirim?',
-        confidence: 0.9,
-        usage: 0
-      },
-      {
-        keywords: ['altın', 'para', 'transfer'],
-        response: 'Altın transferi hakkında detaylı bilgi için "Sorular & İletişim" sayfamızı ziyaret edebilirsiniz.',
-        confidence: 0.8,
-        usage: 0
-      },
-      {
-        keywords: ['fiyat', 'ücret', 'ne kadar'],
-        response: 'Ürün fiyatları için "Ürün Listenizi Oluşturun" sayfasını inceleyebilirsiniz.',
-        confidence: 0.8,
-        usage: 0
-      },
-      {
-        keywords: ['depolama', 'ağıl', 'ambar'],
-        response: 'Depolama hesaplamaları için "Depolama Hesaplayıcısı" sayfamızı kullanabilirsiniz.',
-        confidence: 0.8,
-        usage: 0
-      },
-      {
-        keywords: ['makine', 'üretim', 'seviye'],
-        response: 'Makine bilgileri için "Makineler" sayfamızdan detaylı bilgi alabilirsiniz.',
-        confidence: 0.8,
-        usage: 0
+    try {
+      const fileContent = fs.readFileSync(knowledgeBasePath, 'utf8');
+      const parsed = JSON.parse(fileContent);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        this.knowledgeBase = parsed;
+        return;
       }
-    ]);
+      Logger.warn('Knowledge base file is empty or invalid, using defaults');
+    } catch (error) {
+      Logger.warn('Knowledge base could not be loaded, using defaults', { error });
+    }
+    this.knowledgeBase = defaultKnowledgeBase;
   }
 
   analyzeMessage(message) {
@@ -459,18 +389,20 @@ app.post('/api/chat/send', [
     const sanitizedMessage = message.trim().replace(/\s+/g, ' ');
 
     // Add user message to log
-    const chatLog = await FileManager.readJSONFile(FILES.chatLog, []);
     const userMessage = {
       timestamp: Date.now(),
       clientId: clientId,
       role: 'user',
       content: sanitizedMessage
     };
-    chatLog.push(userMessage);
+    await dataStore.addMessage(userMessage);
 
     // Process with ChatBot
     const botAnalysis = chatBot.analyzeMessage(sanitizedMessage);
-    let response, role;
+    let response;
+    let role;
+    let confidence = botAnalysis.confidence || 0.85;
+    let tokensUsed = null;
 
     if (!botAnalysis.shouldEscalate && botAnalysis.match) {
       response = botAnalysis.match.response;
@@ -479,6 +411,8 @@ app.post('/api/chat/send', [
       const aiResult = await aiProcessor.processMessage(sanitizedMessage);
       response = aiResult.response;
       role = 'ai';
+      confidence = typeof aiResult.confidence === 'number' ? aiResult.confidence : confidence;
+      tokensUsed = typeof aiResult.tokensUsed === 'number' ? aiResult.tokensUsed : null;
     } else {
       response = 'Size yardımcı olmaya çalışıyorum. Sorular & İletişim sayfamızdan bize ulaşabilirsiniz.';
       role = 'chatbot';
@@ -490,32 +424,25 @@ app.post('/api/chat/send', [
       clientId: clientId,
       role: role,
       content: response,
-      confidence: botAnalysis.confidence || 0.85
+      confidence: confidence,
+      tokensUsed
     };
-    chatLog.push(botMessage);
-
-    await FileManager.writeJSONFile(FILES.chatLog, chatLog);
+    await dataStore.addMessage(botMessage);
 
     // Update analytics
-    const analytics = await FileManager.readJSONFile(FILES.analytics, {});
     const today = moment().format('YYYY-MM-DD');
-    if (!analytics[today]) {
-      analytics[today] = { total: 0, chatbot: 0, ai: 0, admin: 0 };
-    }
-    analytics[today].total += 1;
-    analytics[today][role] += 1;
-    await FileManager.writeJSONFile(FILES.analytics, analytics);
+    await dataStore.incrementAnalytics(today, role);
 
     // Notify admin
     if (telegramManager) {
       await telegramManager.notifyNewMessage(sanitizedMessage, response, role);
     }
 
-    res.json({ 
-      reply: response, 
+    res.json({
+      reply: response,
       role: role,
-      confidence: botAnalysis.confidence || 0.85,
-      timestamp: Date.now()
+      confidence: confidence,
+      timestamp: botMessage.timestamp
     });
 
   } catch (error) {
@@ -532,10 +459,9 @@ app.post('/api/chat/send', [
 app.get('/api/chat/history/:clientId', async (req, res) => {
   try {
     const { clientId } = req.params;
-    const chatLog = await FileManager.readJSONFile(FILES.chatLog, []);
-    const userHistory = chatLog.filter(msg => msg.clientId === clientId);
-    
-    res.json({ history: userHistory });
+    const history = await dataStore.getMessagesByClient(clientId);
+
+    res.json({ history });
   } catch (error) {
     res.status(500).json({ error: 'Could not fetch history' });
   }
@@ -544,19 +470,15 @@ app.get('/api/chat/history/:clientId', async (req, res) => {
 app.get('/api/chat/poll/:clientId', async (req, res) => {
   const { clientId } = req.params;
   const { after } = req.query;
-  
+
   try {
-    const chatLog = await FileManager.readJSONFile(FILES.chatLog, []);
     const afterTimestamp = parseInt(after) || 0;
-    
-    const newMessages = chatLog.filter(msg => 
-      msg.clientId === clientId && 
-      msg.timestamp > afterTimestamp
-    );
-    
-    res.json({ 
+
+    const newMessages = await dataStore.getMessagesAfter(clientId, afterTimestamp);
+
+    res.json({
       newMessages: newMessages,
-      lastTimestamp: newMessages.length > 0 ? 
+      lastTimestamp: newMessages.length > 0 ?
         Math.max(...newMessages.map(m => m.timestamp)) : afterTimestamp
     });
   } catch (error) {
@@ -573,13 +495,12 @@ async function authenticateAdmin(req, res, next) {
 
   const token = authHeader.substring(7);
   try {
-    const sessions = await FileManager.readJSONFile(FILES.adminSessions, {});
-    const session = sessions[token];
-    
-    if (!session || Date.now() > session.expires) {
+    const session = await dataStore.getAdminSession(token);
+
+    if (!session) {
       return res.status(401).json({ error: 'Invalid or expired token' });
     }
-    
+
     req.adminSession = session;
     next();
   } catch (error) {
@@ -632,17 +553,8 @@ app.post('/api/admin/verify-code', [
   const isValid = telegramManager.verifyAuthCode(telegramId, code);
   
   if (isValid) {
-    const sessionToken = uuidv4();
-    const sessions = await FileManager.readJSONFile(FILES.adminSessions, {});
-    sessions[sessionToken] = {
-      telegramId: telegramId,
-      created: Date.now(),
-      expires: Date.now() + (24 * 60 * 60 * 1000),
-      lastActivity: Date.now()
-    };
-    await FileManager.writeJSONFile(FILES.adminSessions, sessions);
-    
-    res.json({ success: true, token: sessionToken });
+    const session = await dataStore.createAdminSession(telegramId);
+    res.json({ success: true, token: session.token, expiresAt: session.expiresAt });
   } else {
     res.status(400).json({ error: 'Invalid or expired code' });
   }
@@ -650,36 +562,19 @@ app.post('/api/admin/verify-code', [
 
 app.get('/api/admin/dashboard', authenticateAdmin, async (req, res) => {
   try {
-    const chatLog = await FileManager.readJSONFile(FILES.chatLog, []);
-    const analytics = await FileManager.readJSONFile(FILES.analytics, {});
-    
     const today = moment().format('YYYY-MM-DD');
-    const todayStats = analytics[today] || { total: 0, chatbot: 0, ai: 0, admin: 0 };
-    
+    const todayStats = await dataStore.getAnalyticsForDate(today);
     const activeThreshold = Date.now() - (30 * 60 * 1000);
-    const activeConversations = chatLog
-      .filter(msg => msg.timestamp > activeThreshold)
-      .reduce((acc, msg) => {
-        if (!acc[msg.clientId]) {
-          acc[msg.clientId] = { messages: [], lastActivity: msg.timestamp };
-        }
-        acc[msg.clientId].messages.push(msg);
-        acc[msg.clientId].lastActivity = Math.max(acc[msg.clientId].lastActivity, msg.timestamp);
-        return acc;
-      }, {});
+    const activeChats = await dataStore.getActiveConversations(activeThreshold);
+    const totalMessages = await dataStore.getTotalMessagesCount();
 
     res.json({
       stats: {
         today: todayStats,
-        activeConversations: Object.keys(activeConversations).length,
-        totalConversations: chatLog.length
+        activeConversations: activeChats.length,
+        totalConversations: totalMessages
       },
-      activeChats: Object.entries(activeConversations).map(([clientId, data]) => ({
-        clientId,
-        lastMessage: data.messages[data.messages.length - 1],
-        messageCount: data.messages.length,
-        lastActivity: data.lastActivity
-      }))
+      activeChats
     });
   } catch (error) {
     res.status(500).json({ error: 'Could not fetch dashboard data' });
@@ -710,9 +605,8 @@ app.post('/webhook/telegram', async (req, res) => {
             response = '🤖 HayDay Chat Bot aktif!\n\nKomutlar:\n/stats - İstatistikler\n/ping - Sistem durumu\n/help - Yardım';
             break;
           case '/stats':
-            const analytics = await FileManager.readJSONFile(FILES.analytics, {});
             const today = moment().format('YYYY-MM-DD');
-            const todayStats = analytics[today] || { total: 0, chatbot: 0, ai: 0, admin: 0 };
+            const todayStats = await dataStore.getAnalyticsForDate(today);
             response = `📊 Bugün: ${todayStats.total} mesaj\n🤖 Bot: ${todayStats.chatbot}\n🧠 AI: ${todayStats.ai}\n👨‍💼 Admin: ${todayStats.admin}`;
             break;
           case '/ping':
@@ -742,25 +636,35 @@ app.use((error, req, res, next) => {
 // Graceful shutdown
 process.on('SIGTERM', () => {
   Logger.info('SIGTERM received, shutting down gracefully');
-  process.exit(0);
+  stopServer().finally(() => {
+    process.exit(0);
+  });
 });
 
 process.on('SIGINT', () => {
-  Logger.info('SIGINT received, shutting down gracefully');  
-  process.exit(0);
+  Logger.info('SIGINT received, shutting down gracefully');
+  stopServer().finally(() => {
+    process.exit(0);
+  });
 });
 
-// Start server
-const server = app.listen(PORT, () => {
-  Logger.info('HayDay Chat System started', {
-    port: PORT,
-    environment: process.env.NODE_ENV || 'development',
-    openai: !!openai,
-    telegram: !!telegramBot,
-    pid: process.pid
-  });
-  
-  console.log(`
+let serverInstance = null;
+
+function startServer() {
+  if (serverInstance) {
+    return serverInstance;
+  }
+
+  serverInstance = app.listen(PORT, () => {
+    Logger.info('HayDay Chat System started', {
+      port: PORT,
+      environment: process.env.NODE_ENV || 'development',
+      openai: !!openai,
+      telegram: !!telegramBot,
+      pid: process.pid
+    });
+
+    console.log(`
 🚀 HayDay Chat System v1.0.0
 ╭─────────────────────────────────────────╮
 │  🌐 Server: http://localhost:${PORT}      │
@@ -770,7 +674,31 @@ const server = app.listen(PORT, () => {
 │  ✅ OpenAI: ${openai ? '🟢 Connected' : '🔴 Disabled'} │
 │  📱 Telegram: ${telegramBot ? '🟢 Connected' : '🔴 Disabled'} │
 ╰─────────────────────────────────────────╯
-  `);
-});
+    `);
+  });
 
-module.exports = { app, server };
+  return serverInstance;
+}
+
+function stopServer() {
+  if (!serverInstance) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    serverInstance.close(error => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      serverInstance = null;
+      resolve();
+    });
+  });
+}
+
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = { app, startServer, stopServer };
